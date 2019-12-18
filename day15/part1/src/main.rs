@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::collections::HashMap;
 use std::thread;
 use std::sync::mpsc;
@@ -9,8 +9,6 @@ use std::fmt;
 extern crate pathfinding;
 use pathfinding::utils::absdiff;
 use pathfinding::prelude::{astar, bfs};
-
-extern crate crossterm;
 
 #[derive(Debug)]
 enum ParameterMode {
@@ -30,7 +28,7 @@ impl From<char> for ParameterMode {
     }
 }
 
-#[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Hash, Clone)]
+#[derive(Debug, Eq, Ord, PartialOrd, PartialEq, Hash, Clone, Copy)]
 struct Position(i64,i64);
 
 impl Position {
@@ -58,6 +56,10 @@ struct Grid {
     known_positions: HashMap<Position, StatusCode>,
     start: Position,
     robot_position: Position,
+    min_x: i64,
+    min_y: i64,
+    max_x: i64,
+    max_y: i64
 }
 
 impl Grid {
@@ -65,7 +67,11 @@ impl Grid {
         let mut g = Grid {
             known_positions: HashMap::new(),
             start: Position(0,0),
-            robot_position: Position(0,0)
+            robot_position: Position(0,0),
+            min_x: 0,
+            min_y: 0,
+            max_x: 0,
+            max_y: 0
         };
         g.known_positions.insert(Position(0,0), StatusCode::Ok);
         return g;
@@ -107,57 +113,16 @@ impl Grid {
         rv
     }
 
-    fn bfs_successors(&self, p: &Position) -> Vec<Position> {
-        let mut rv = Vec::new();
-        // check 4 directions
-        // each direction can be a successor as long as no wall present
-
-        { // scopes to prevent accidentally using same position twice when copy/pasting
-            let up_pos = Position( p.0, p.1 + 1 );
-            if *self.known_positions.get(&up_pos).or(Some(&StatusCode::Unknown)).unwrap() != StatusCode::Wall {
-                rv.push(up_pos);
-            }
-        }
-
-        {
-            let down_pos = Position( p.0, p.1 - 1 );
-            if *self.known_positions.get(&down_pos).or(Some(&StatusCode::Unknown)).unwrap() != StatusCode::Wall {
-                rv.push(down_pos);
-            }
-        }
-
-        {
-            let left_pos = Position( p.0 - 1, p.1 );
-            if *self.known_positions.get(&left_pos).or(Some(&StatusCode::Unknown)).unwrap() != StatusCode::Wall {
-                rv.push(left_pos);
-            }
-        }
-
-        {
-            let right_pos = Position( p.0 + 1, p.1 );
-            if *self.known_positions.get(&right_pos).or(Some(&StatusCode::Unknown)).unwrap() != StatusCode::Wall {
-                rv.push(right_pos);
-            }
-        }
-
-        rv
-    }
-
     fn move_robot_to_target(&mut self, target: &Position, robot_tx: &mpsc::Sender<i64>, robot_rx: &mpsc::Receiver<i64>, draw: bool) -> StatusCode {
-//        println!("at {:?}, moving to {:?}", self.robot_position, target);
-        let mut s = self.known_positions.get(target).or(Some(&StatusCode::Unknown)).unwrap().clone();
+        let mut s: StatusCode;
 
         'find_target: loop {
-//            println!("starting loop");
             let path = astar(&self.robot_position, |p| self.successors(p), |p| p.distance(&target), |p| p == target).unwrap();
-//            println!("{:?}", path);
 
             // if there are any unknowns, can only move to first one before recalculating path
             // because revealing can show a path is no longer valid
             for path_pos in path.0.iter().skip(1) {
-//                println!("at {:?}, want {:?}", self.robot_position, path_pos);
                 let movement = self.robot_position.move_to_other(path_pos);
-//                println!("moving {:?}", movement);
                 robot_tx.send(movement.into()).unwrap();
                 s = robot_rx.recv().unwrap().into();
 
@@ -172,12 +137,16 @@ impl Grid {
 
                 if self.known_positions.get(&path_pos).is_none() {
                     self.known_positions.insert(path_pos.clone(), s.clone());
+                    self.min_x = min(self.min_x, path_pos.0);
+                    self.min_y = min(self.min_y, path_pos.1);
+                    self.max_x = max(self.max_x, path_pos.0);
+                    self.max_y = max(self.max_y, path_pos.1);
 
                     // first time finding this target
                     if path_pos == target {
                         break 'find_target;
-                    } else {
-                        // found an unknown that isn't target
+                    } else if s == StatusCode::Wall {
+                        // path is blocked by wall
                         // recompute path
                         continue 'find_target;
                     }
@@ -191,21 +160,9 @@ impl Grid {
     }
 
     fn draw(&self) {
-        let mut min_x = 0;
-        let mut min_y = 0;
-        let mut max_x = 0;
-        let mut max_y = 0;
-
-        for (pos, _) in self.known_positions.iter() {
-            min_x = min(min_x, pos.0);
-            min_y = min(min_y, pos.1);
-            max_x = max(max_x, pos.0);
-            max_y = max(max_y, pos.1);
-        }
-
-        crossterm::execute!(std::io::stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::All));
-        for y in (min_y..=max_y).rev() {
-            for x in min_x..=max_x {
+        println!("-----------------------------------------------------");
+        for y in (self.min_y..=self.max_y).rev() {
+            for x in self.min_x..=self.max_x {
                 if x == self.robot_position.0 && y == self.robot_position.1 {
                     print!("D");
                 } else if x == 0 && y == 0 {
@@ -216,8 +173,8 @@ impl Grid {
             }
             println!();
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-
+        std::thread::sleep(std::time::Duration::from_millis(50));
+//        std::io::stdin().read(&mut [0u8]).unwrap();
     }
 }
 
@@ -430,14 +387,12 @@ fn main() {
 
         // get shortest path to unknown position
         let path = bfs(&grid.robot_position,
-                         |p| grid.bfs_successors(p),
+                         |p| grid.successors(p).iter().map(|p2| p2.0).collect::<Vec<Position>>(),
                          |p| *grid.known_positions.get(&p).or(Some(&StatusCode::Unknown)).unwrap() == StatusCode::Unknown).unwrap();
 
         // send movement commands to reach unknown
         for path_pos in path.iter().skip(1) {
             let s = grid.move_robot_to_target(path_pos, &robot_command_tx, &robot_status_rx, false);
-//            grid.draw();
-//            std::io::stdin().read(&mut [0u8]).unwrap();
             if s == StatusCode::Goal {
                 found_goal = true;
             }
@@ -459,6 +414,7 @@ fn main() {
         let mut first_unknown = None;
         for path_pos in path.0.iter().skip(1) {
             if *path_pos == grid.start {
+                // uncomment two lines to see robot take path from start to oxygen system
 //                grid.move_robot_to_target(&oxygen_position, &robot_command_tx, &robot_status_rx, true);
 //                grid.move_robot_to_target(&grid.start.clone(), &robot_command_tx, &robot_status_rx, true);
                 println!("{}", path.1);

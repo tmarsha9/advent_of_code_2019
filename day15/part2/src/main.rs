@@ -142,8 +142,8 @@ impl Grid {
                     // first time finding this target
                     if path_pos == target {
                         break 'find_target;
-                    } else {
-                        // found an unknown that isn't target
+                    } else if s == StatusCode::Wall {
+                        // path is blocked by wall
                         // recompute path
                         continue 'find_target;
                     }
@@ -225,7 +225,6 @@ impl Grid {
             println!();
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
-
     }
 }
 
@@ -454,7 +453,7 @@ fn main() {
     // start simulating oxygen flow
     let mut oxygen_tick_counter = 0;
     loop {
-        if grid.simulate_oxygen(true) {
+        if grid.simulate_oxygen(false) {
             println!("{}", oxygen_tick_counter);
             break;
         } else {
